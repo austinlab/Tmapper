@@ -1,0 +1,816 @@
+#!/bin/bash
+### Tmapper :
+### identify positions of T-DNA inserts from NGS data and insert sequence
+### By Keegan Leckie, Agriculture and Agri-Food Canada & University of Western Ontario
+### Supervisor Dr. Ryan Austin
+### Last Modified Jun. 21, 2017
+
+# THIRD party programs config 
+BLAST=blastall
+FORMATDB=formatdb
+
+### USAGE config 
+if [[ $# -lt 6 ]] 
+then
+	if [[ $1 == -h ]]
+	then
+		echo "Extended usage"
+	else
+		echo "usage: insertMapper -a <read1.fastq> -b <read2.fastq> -i <insert.fasta> -f <genome.fasta> -g <genome.gff3> -lprdh"
+		exit 1	
+	fi
+fi
+while getopts a:b:i:f:g:lprdh opts; do
+	case ${opts} in
+		a) read1=${OPTARG};;
+		b) read2=${OPTARG};;
+		i) insert=${OPTARG};;
+		f) genome=${OPTARG};;
+		g) echo "Mapping to GFF on..."
+			 gff3=${OPTARG};;
+		l) echo "Loci mapping on..." 
+			 touch .lflag ;;
+		p) echo "Provided processed reads."
+			 touch .pflag ;;
+		r) echo "Provided reads mapping to insert." 
+			 touch .rflag ;;
+		d) echo "Will convert genome border reads to .bed files."
+			 touch .dflag ;;
+		h) echo "		
+Arguments
+-a	<read1.fastq> 		sequencing reads (read 1 if paired-end):	Fastq format
+-b	<read2.fastq> 		read 2 of paired-end(optional):			Fastq format
+-i	<insert.fasta> 		T-DNA insert sequence:				Fasta format
+-f	<genome.fasta>  	Organism genome sequence:			Fasta format(clean)
+-g	<genome.gff3> 		General Feature Format(.GFF3)(optional):	GFF3 format
+
+Flags
+-l 		Turn on insert loci mapping (requires pair-end reads)
+-p		Provide file of processed reads in fasta format
+-r		Provide files of reads mapping to T-DNA insert and mapping positions
+-d		Convert border spanning reads to .bed files
+-h		Extended usage message
+"
+		   exit 1 ;;
+		\?) echo "error: invalid switch";;
+	esac
+done
+
+## Format checking of fastq/fasta
+if [[ ! -e $read1 ]]
+then
+	echo "error: first read file does not exist: $read1"
+	exit 1
+else
+	head -n 1 $read1 | grep '^@' >/dev/null
+	if (($?))
+	then
+		echo "error: first read file does not appear to be a fastq file: $read1"
+		exit 1
+	fi
+fi
+if [[ -e $read2 ]]     
+then
+		head -n 1 $read2 | grep '^@' >/dev/null
+		if (($?))
+		then
+				echo "error: second read file does not appear to be a fastq file: $read2"
+				exit 1
+		fi
+fi
+if [[ ! -e $insert ]]
+then
+	echo "error: insert file does not exist: $insert"
+	exit 1
+else
+	head -n 1 $insert | grep '^>' >/dev/null
+	if (($?))
+	then
+		echo "error: insert file does not appear to be in fasta format: $insert"
+		exit 1
+	fi
+fi
+if [[ ! -e $genome ]]
+then
+	echo "error: genome file does not exist: $genome"
+	exit 1
+else
+	head -n 1 $genome | grep '^>' >/dev/null
+	if (($?))
+	then
+		echo "error: genome file does not appear to be in fasta format: $genome"
+		exit 1
+	fi
+fi
+
+
+############################################################################################################################
+#######################################################    Functions    ####################################################
+############################################################################################################################
+
+# Reference insert positions in GFF3 files to report genome alterations.  
+# Requires GFF3 file and insert positions with chromosome.
+# Called for single or double insertion breaks where a single or both T-DNA borders are identified. 
+function call_feature {
+	perl -e '
+	@AoA = ();
+        open (GFF3, "$ENV{gff3}") or die;
+        while (<GFF3>)
+                {
+                @gff3 = (split /\s+/, $_);
+                push (@AoA, [ @gff3 ]);
+                }
+
+				# Search for intragenic insertions (insertion found within coding DNA)
+        open (FH, ">>", "intragenic");
+        open (DATA, "chr_breakpoint");
+        while (<DATA>)
+                {
+                @data = (split /\s+/, $_);
+                foreach $row (@AoA)
+                        {
+                        if ($row-> [2] =~ /gene/ && $row-> [0] == $data[0] && $row-> [3] < $data[1] && $row-> [4] > $data[1])
+                                {
+                                print FH "@$row\t$data[0]\t$data[1]\n";
+                                }
+                        }
+                }
+        close(FH);
+	
+				$i = 0;
+        $intragenic = "intragenic";
+        if (-z $intragenic) # If the intragenic file is empty, or there are no hits, then all possible insertions must be intergenic.
+                {
+                unlink $intragenic;
+                open (INTER, "chr_breakpoint");
+                while (<INTER>)
+                        {
+                        @inter = (split /\s+/, $_);
+                        $i++;
+                        foreach $row (@AoA)
+                                {
+                                if ($row->[0] == $inter[0] && $row-> [2] =~ /gene/ && $row-> [4] < $inter[1])
+                                        {
+                                        open (FH, ">", "intergenic_before_$i") or die;
+                                        print FH "@$row\t$inter[0]\t$inter[1]\n";
+                                        close (FH);
+                                        }
+                                if  ($row-> [0] == $inter[0] && $row-> [2] =~ /gene/ && $row-> [3] > $inter[1])
+                                        {
+                                        open (FH, ">>", "intergenic_after_$i") or die; # 
+                                        print FH "@$row\t$inter[0]\t$inter[1]\n";
+                                        close (FH);
+                                        last;
+                                        }
+                                }
+                        }
+                close(INTER);
+                }
+				else
+                {
+                open (FH, ">>", "intra_breakpoint") or die;
+                open (INTRA, "intragenic") or die;
+                while (<INTRA>)
+                        {
+                        @intra = (split /\s+/, $_);
+                        print FH "$intra[9]\t$intra[10]\n";
+                        }
+                close(FH);
+
+                %hash = ();
+                open (FH, "intra_breakpoint") or die;
+                while (<FH>)
+                        {
+                        $hash{$_} = 1;
+                        }
+                open (DATA, "chr_breakpoint") or die; # Cross reference intragenic breakpoints with original list of breakpoints.  
+                while (<DATA>)			      # What doesnt match is then an intergenic breakpoint
+                        {
+                        $k = $_;
+                        if (not exists $hash{$k})
+                                {
+                                open (FH, ">>", "intergenic") or die; 
+                                print FH "$k";
+                                close (FH);
+                                }
+                        }
+                }
+	
+	# Intergenic Insertions (insertions found in non-coding DNA)
+        if (-z $intergenic) # If this file is empty, then all insertions were intragenic and there is no intergenic insertions
+        		{
+            last;
+            }
+				else                # If this file is not empty, then there are intergenic insertions to be identified
+           {
+           open (INTER, "intergenic");
+           while (<INTER>)
+                	{
+           		     @inter = (split /\s+/, $_);
+                   $i++;
+                   foreach $row (@AoA)
+                     	{
+                      if ($row->[0] == $inter[0] && $row-> [2] =~ /gene/ && $row-> [4] < $inter[1])
+                         	{
+                          open (FH, ">", "intergenic_before_$i") or die;
+                          print FH "@$row\t$inter[0]\t$inter[1]\n"; #print GFF3 line and break point
+                          close (FH);
+                          }
+                      if  ($row-> [0] == $inter[0] && $row-> [2] =~ /gene/ && $row-> [3] > $inter[1])
+                         	{
+                          open (FH, ">>", "intergenic_after_$i") or die;
+                          print FH "@$row\n";
+                          close (FH);
+                          last;
+                          }
+                      }
+                 }
+            }'
+}
+
+# These two functions are called right after the call feature function.  
+# Specifically used to generate output files of genome alterations for insertions where double or single border junctions are identifed.
+
+function single_border_call {
+     	counter=1
+    	while [[ $counter -lt 50 ]] 
+		 	do # More than 50 insertions would be rediculous
+      	if [[ -e intergenic_after_${counter} ]] && [[ -e intergenic_before_${counter} ]] #intergenic insertions with single border identified
+        then
+          (printf "Single border junction identified\nIntergenic insertion found between:\n";
+          awk '-F[ ;]' '{print $9}' intergenic_before_${counter};
+          awk '-F[ ;]' '{print $9}' intergenic_after_${counter}; 
+					printf "Insertion at chromosome ";
+					awk '-F[ ;\t]' '{print $12}' intergenic_before_${counter};
+					printf "Base pair position ";
+					awk '-F[ ;\t]' '{print $13}' intergenic_before_${counter};
+					printf "\n") >> Intergenic_insertions
+          let counter=counter+1
+        else
+          break
+        fi
+     	done
+      if [[ -e intragenic ]] #intragenic insertion with single border identified 
+      then
+        awk -F'[ ;\t]' '{print "Single border junction identified\nIntragenic insertions found in:\n"$9"\nInsertion at chromosome "$12"\nBase pair position "$13"\n"}' intragenic >> Intragenic_insertions
+      fi
+      rm -f intra_breakpoint
+      rm -f intragenic
+      rm -f intergenic
+      rm -f intergenic_after_*
+      rm -f intergenic_before_*
+      rm -f chr_breakpoint
+}
+
+function dual_border_call {
+	counter=1
+	while [[ $counter -lt 50 ]]; do
+    	if [[ -e intergenic_after_${counter} ]] && [[ -e intergenic_before_${counter} ]] #intergenic insertions with both borders identified
+     	then
+         	(printf "Both border junctions identified\nIntergenic insertion found between:\n"; 
+					awk '-F[ ;]' '{print $9}' intergenic_before_${counter}; 
+					awk '-F[ ;]' '{print $9}' intergenic_after_${counter}; 
+					printf "Insertion at chromosome ";
+					awk '-F[ ;\t]' '{print $12}' intergenic_before_${counter};
+					printf "Base pair position ";
+					awk '-F[ ;\t]' '{print $13}' intergenic_before_${counter};
+					printf "\n") >> Intergenic_insertions
+         	let counter=counter+1
+     	else
+         	break
+     	fi
+	done
+
+	if [[ -e intragenic ]] #intragenic insertions with both borders identified
+	then
+    awk -F'[ ;\t]' '{print "Both border junctions identified\nIntragenic insertions found in:\n"$9"\nInsertion at chromosome "$12"\nBase pair position "$13"\n"}' intragenic >> Intragenic_insertions
+	fi
+
+	rm -f intra_breakpoint
+	rm -f intragenic
+	rm -f intergenic
+	rm -f intergenic_after_*
+	rm -f intergenic_before_*
+	rm -f chr_breakpoint
+}
+
+############################################################################################################################
+#######################################    ISOLATE INSERT JUNCTION CONTAINING READS    #####################################
+############################################################################################################################
+
+#### First phase, converting pre-trimmed sequencing data from fastq to fasta format.  ####
+echo Preprocessing reads...
+export read1
+perl -e'
+open (FH, "$ENV{read1}");
+while (not eof (FH))
+  {
+  chomp($ID = <FH>);
+  chomp($seq = <FH>);
+	$len = length($seq);	 # also grab read length
+  <FH>;<FH>;						 # discard next two lines
+  @annot = (split /[:\s]+/, $ID);
+  print ">$annot[4]:$annot[5]:$annot[6]_R1:$len\n$seq\n"
+  }' > .proRd1.$$.fasta
+
+if [[ -e $read2 ]] # If paired-end reads are provided
+	then 
+		export read2
+		perl -e'
+		open (FH, "$ENV{read2}");
+		while (not eof (FH))
+ 			{
+ 			chomp($ID = <FH>);
+ 			chomp($seq = <FH>);
+			$len = length($seq);
+ 			<FH>;<FH>;
+ 			@annot = (split /[:\s]+/, $ID);
+ 			print ">$annot[4]:$annot[5]:$annot[6]_R2:$len\n$seq\n"
+ 			}' > .proRd2.$$.fasta
+fi
+if [[ -e .proRd2.$$.fasta ]] # If paired-end reads are provided, they are merged into same file.
+	then
+		cat .proRd1.$$.fasta .proRd2.$$.fasta > processedrds.fasta
+		rm -f .proRd1.$$.fasta .proRd2.$$.fasta
+	else
+		mv .proRd1.$$.fasta processedrds.fasta
+fi
+
+##### Making a new directory which will contain the "chunked" sequence data ####
+mkdir .distributeBLAST/
+mv processedrds.fasta .distributeBLAST/
+cp $insert .distributeBLAST/ # cp user file
+cd .distributeBLAST/
+echo Formating insert database...
+$FORMATDB -o T -p F -i $insert 
+
+#### BLAST alignments against insert would use up too much RAM.  Short perl script that will divide reads into sets of ####
+#### 100000.  This will also allow multiple BLAST alignments over multiple cores.
+echo Distributing Fasta...
+perl -e '
+$count = 1;
+open (FH, "processedrds.fasta") or die "can not open fasta file";
+while (not eof (FH))
+        {
+        open (NF, ">$count.fasta") or die "failed to write to new fail"; # Write to numbered fasta file
+        for ($x = 0; $x < 100000; $x++) # Initialize x as zero, continue loop until x equales 100000
+                {
+                chomp ($ID = <FH>);
+                $Seq = <FH>;
+                print NF "$ID\n$Seq"
+                }
+        $count++;
+        }
+'
+echo Searching for Insert Alignments...
+mv processedrds.fasta ..
+
+#### Will perform multiple BLAST alignments in the "chunked" fasta files. ####
+for x in *.fasta
+do
+	while [ $(ps -Af | grep blastall | wc -l) -ge 50 ]
+	do
+		sleep 10
+	done;
+	$BLAST -p blastn -i $x -d $insert -e 1e-10 -m 8 -o ${x}.blast.out 2> blastERR.out & 
+	sleep 2
+done
+wait
+rm -f ${insert}.blast.out # insert file ends in .fasta, so blast does alignments against it.  Not needed.
+cat *fasta.blast.out > .rds2insert.preout # merge all blast output files 
+mv .rds2insert.preout ..
+cd ..
+
+if [[ -s .rds2insert.preout ]] # If no reads containing matching alignments to the insert are found, script ends
+then
+		echo "Reads matching insert sequence found"
+else
+	echo "No reads matching insert sequence were identified"
+#	rm -f .rds2insert.preout
+  rm -rf .distributeBLAST
+	if [[ ! -e .pflag ]] # Remove processed read file unless user provides -p switch
+  then
+    rm -f processedrds.fasta
+	else
+		rm -f .pflag
+  fi
+	if [[ -e .rflag ]] # Remove .rflag as no reads were found matching the insert sequence
+		then
+		echo "Can not provide .FASTA file of insert aligning reads (-r switch)."
+		rm -f .rflag
+	fi
+	if [[ -e .lflag ]]
+		then
+		echo "Can not map for insert loci, no reads found aligning to insert (-l switch)."
+		rm -f .lflag
+	fi
+	exit 1
+fi
+
+#### Unique sort based on read I.D.  Removes HSPs from Blast search.  ####
+rds2insert="$(cat .rds2insert.preout | sort -uk1,1)"
+echo "${rds2insert}" | awk '{print $1}' > .rds2insert.ID.out
+
+#### Will turn the list of read IDs into a hash.  Then searches the processed read file for matches against the ####
+#### read ID hash elements.  Once a match is found the whole read is pulled out. This is done becuase the blast results only provide
+#### the read id, so the sequence must be retrieved again.  
+perl -e '
+	%hash = ();
+	open (FH, ".rds2insert.ID.out") or die;
+	while (<FH>)
+		{
+		$hash{$_} = 1;
+		}
+	open (FH, "processedrds.fasta") or die;
+	while (<FH>)
+		{
+		$k = $_;
+		$k =~ s/>//;
+		if (exists $hash{$k})
+			{
+			$seq = <FH>;
+			print >$k;
+			print $seq;
+			}
+		}
+	' > rds2insert.fasta
+echo Formatting Genome Database...
+$FORMATDB -o T -p F -i $genome 
+
+#### Using BLAST to search for read alignments to the genome. ####
+echo Searching for Alignments to Genome
+insertrds2genome=`$BLAST -p blastn -d $genome -i rds2insert.fasta -e 1e-10 -m 8`
+
+if [[ ! -z $insertrds2genome ]] # If file is non-zero size, ie. contains reads matching genome.
+	then
+		echo "Insert containing reads matching to genome found"
+else
+	echo "No reads containing partial sequence alignments to the insert and genome were identified"
+	rm -rf .distributeBLAST
+	rm -f .rds2insert.preout .rds2insert.ID.out formatdb.log
+
+	if [[ ! -e .lflag ]] # If loci mapping is not turned on, then exit program.
+		then
+		if [[ ! -e .rflag ]]
+			then
+			rm -f rds2insert.fasta
+		else
+			rm -f .rflag
+		fi
+	
+		if [[ ! -e .pflag ]]
+			then
+			rm -f processedrds.fasta
+		else
+			rm -f .pflag
+		fi
+		
+		if [[ -e .dflag ]]
+			then
+			echo "Can not convert genome spanning reads into .BED files: No insertion sites found"
+			rm -f .dflag
+		fi
+		exit 1
+	fi
+
+fi
+
+if [[ ! -z $insertrds2genome ]] # If variable is non-zero size, continue with script.
+	then
+	#### Unique sort of read ID to remove HSPs. ####  
+	insertrds2genomeID=$(echo "${insertrds2genome}" | sort -uk1,1 | awk '{print $1}')
+
+	#### Stats dirrectory made to contain BLAST results for each read that aligns to both the genome and the insert. ####
+	mkdir .stats/
+	cd .stats/
+	echo Determining Hybrid Sequencing Reads
+
+	#### Based on read ID, BLAST results between read alignments to the insert and the genome are paired together. ####
+	for x in `echo "${insertrds2genomeID}"` ; do ( echo "${rds2insert}" | grep $x ; echo "${insertrds2genome}" | grep $x ) > ${x}.rd ; done
+	for x in *.rd ; do cat $x | tr "\\n" "\t" | sed 's/$/\n/' > ${x}.out ; done
+
+	basefile=$(cat *.rd.out)
+
+	cd ..
+
+	#### Rearranging the data display, and removing reads with overlapping homologous alignments to both the insert ####
+	#### and the genome.  A 10 base pair overlap is allowed to acount for microhomologies.  
+
+	hybridrds=$(echo "${basefile}" |
+	sed 's/:/\t/g' |
+	awk '{print $1":"$2":"$3"\t"$4"\t"$7/$4"\t"$22/$4"\t"$10"\t"$11"\t"$12"\t"$13"\t"$20"\t"$25"\t"$26"\t"$27"\t"$28}' |
+	awk '{
+     		if ($6 <= ($10+10) || $11 <= ($5+10))  
+        		{
+        		print
+        		}
+     	     }' |
+	column -t)
+
+	percentInsert=$(echo "${hybridrds}" | awk '{printf "%.2f\n", $3}') # percent of read sequence matching insert
+	percentGenome=$(echo "${hybridrds}" | awk '{printf "%.2f\n", $4}') # percent_gn.$$.tmp # percent of read sequence matching genome
+
+	paste <(echo "$percentInsert") <(echo "$percentGenome") <(echo "$hybridrds") |
+	awk '{print $3"\t""\t"$4"\t""\t"$1"\t""\t"$2"\t""\t"$7"\t""\t"$8"\t""\t"$9"\t""\t"$10"\t""\t"$11"\t""\t"$12"\t""\t"$13"\t""\t"$14"\t""\t"$15}' |
+	awk '{if ($9 ~/[0-9]+/) {print}}' | # Remove any hits matching non-chromosome, ie chloroplast and mitochondria 
+	sort -k12,12 | 
+	awk 'BEGIN {print "Read ID\t\t\t\tRead Length\t% Insert\t% Genome\tRead Start\tRead End\tInsert Start\tInsert End\tChromosome\tRead Start\tRead End\tGenome Start\tGenome End"} {print}' > Insert_Sites.txt
+
+	# remove tmp files and dirrectories 
+	rm -f .rds2insert.preout .rds2insert.ID.out
+	rm -rf .distributeBLAST .stats
+fi
+############################################################################################################################
+#####################################   DETERMINE INSERT LOCATION AND GENOME ALTERATIONS   #################################
+############################################################################################################################
+
+if [[ -e $gff3 ]] && [[ ! -z $insertrds2genome ]] # If .GFF3 file is provided and if border spanning reads are found.
+	then
+export gff3
+### Add directionality to reads (+,-) and orientate into the positive (+) direction.  This places left insert genome border junction positions in column 13 and right border junctions in column 12.
+cat Insert_Sites.txt | awk '{ if ($12 > $13) {print $0"\t" "-"} else if ($13 > $12) {print $0"\t" "+"}}' | awk '{ if ($14 == "+") {print} else if ($14 =="-") {print $1"\t""\t"$2"\t""\t"$3"\t""\t"$4"\t""\t"$6"\t""\t"$5"\t""\t"$8"\t""\t"$7"\t""\t"$9"\t""\t"$11"\t""\t"12"\t""\t"$13"\t""\t"$12"\t""+"}}' > .sorter.$$.tmp
+
+###Several reads may contain identical genomic alignments (with respect to positions on the read).  This happens when paired end reads contain the same sequence becuase the DNA fragment being sequenced was shorter then the read length (overlap).  Output file sorter2.tmp contains a list of unique genome start and end alignment positions.
+
+awk '{print $12"\t"$13}' .sorter.$$.tmp | sort -k1 | uniq > .sorter2.$$.tmp
+
+### Multiple reads mapping the same T-DNA-genome junction will all contain the same genome alignment start position, ie at the break.  The end position will vary as reads will extend at different lengths down the genome.  To identify the genome alignment positions that is the true T-DNA-genome break, a uniq -c is done.  Atleast 3 reads need to be mapped to a border junction.
+
+awk '{print $1}' .sorter2.$$.tmp | sort | uniq -c | awk '{if ($1 > 2) {print}}' > .pos_junctions.$$.tmp # Right border
+awk '{print $2}' .sorter2.$$.tmp | sort | uniq -c | awk '{if ($1 > 2) {print}}' > .neg_junctions.$$.tmp # Left border
+
+#####Need to have subroutins for both, or single borders found.  Many target capture data only maps a single border
+
+# If both a right and left border are identified
+if [[ -s .pos_junctions.$$.tmp ]] && [[ -s .neg_junctions.$$.tmp ]]
+	then
+	awk '{print $2}' .neg_junctions.$$.tmp > .neg_junctions2.tmp # file used in perl code, so no $$.
+	awk '{print $2}' .pos_junctions.$$.tmp > .pos_junctions2.tmp
+
+perl -e '
+	@LBrange = (); # Empty array
+	open (LB, "<", ".neg_junctions2.tmp") or die; # read from list of border sites
+	while (<LB>)
+		{
+		@line = ();
+		chomp($n = $_);
+		push @line, $n; # push to array
+		push @line, ($n+100); # provides range in which corresponding border should fall into
+		push (@LBrange, [@line]); # push list of ranges 
+		}
+	close LB;
+
+	@single = (); # for junctions where corresponding border hasnt been found
+	@double = (); # for juntions where both border junctions have been identified
+
+	open (RB, "<", ".pos_junctions2.tmp") or die; # read from list of border sites
+	while (<RB>)
+		{
+		chomp($m = $_);
+		$RBflag = 0; # initialize flag 
+		foreach $row (@LBrange)
+			{
+			if ($m >= $row->[0] && $m <= $row->[1]) # if the right border junction is found within the provided range of the left border. 
+				{
+				$RBflag = 1; # flag set to 1
+				push @double, $m; # push junction site into array storing all insertions where both complementing borders are found
+				}
+			}
+		if ($RBflag == 0) # if complementing border not found
+			{
+			push @single, $m;
+			}
+		}
+	close RB;
+
+	open (RB, "<", ".pos_junctions2.tmp") or die; # read from list of border sites
+	while (<RB>)
+		{
+		@line2 = ();
+		chomp($o = $_);
+		push @line2, $o;
+		push @line2, ($o-100);
+		push (@RBrange, [@line2]);
+		}
+	close RB;
+
+	open (LB, "<", ".neg_junctions2.tmp") or die;
+	while (<LB>)
+		{
+		chomp($p = $_);
+		$LBflag = 0;
+		foreach $row2 (@RBrange)
+			{
+			if ($p <= $row2->[0] && $p >= $row2->[1]) # if within range
+				{
+				$LBflag = 1;
+				}
+			}
+		if ($LBflag == 0)
+			{
+			push @single, $p;
+			}
+		}
+
+	open (DBP, ">", ".doublebreakpoint");
+	print DBP "@double\n";
+	close DBP;
+
+	open (SBP, ">", ".singlebreakpoint");
+	print SBP "@single\n";		
+	close SBP;
+' 
+
+if [[ -s .singlebreakpoint ]]
+	then
+	sed s'/\s/\n/' .singlebreakpoint > .singlebreakpoint2
+	rm -f .singlebreakpoint
+	for x in `cat .singlebreakpoint2`
+		do 
+			awk -v var="$x" '$12 ~ var {print $9"\t"$12}' .sorter.$$.tmp | uniq # left border
+			awk -v var="$x" '$13 ~ var {print $9"\t"$13}' .sorter.$$.tmp | uniq # right border
+	done > chr_breakpoint
+	rm -f .singlebreakpoint2
+	call_feature
+	single_border_call
+fi
+	
+if [[ -s .doublebreakpoint ]]
+  then
+		sed s'/\s/\n/' .doublebreakpoint > .doublebreakpoint2
+		rm -f .doublebreakpoint
+    for x in `cat .doublebreakpoint2`
+    do
+       awk -v var="$x" '$12 ~ var {print $9"\t"$12}' .sorter.$$.tmp | uniq # left border
+       awk -v var="$x" '$13 ~ var {print $9"\t"$13}' .sorter.$$.tmp | uniq # right border
+    done > chr_breakpoint
+		rm -f .doublebreakpoint2
+    call_feature
+    dual_border_call
+fi
+
+rm -f .neg_junctions2.tmp
+rm -f .pos_junctions2.tmp
+
+fi # End of "[[ -s .pos_junctions.$$.tmp ]] && [[ -s .neg_junctions.$$.tmp ]]" block
+
+# If only a single border is found - usually with target capture data
+if [[ -s .pos_junctions.$$.tmp ]] && [[ ! -s .neg_junctions.$$.tmp ]]
+	then
+	awk '{print $2}' .pos_junctions.$$.tmp > .pos_junctions2.$$.tmp
+	for x in `cat .pos_junctions2.$$.tmp`
+	do
+			cat .sorter.$$.tmp |
+			awk -v var="$x" '{if($12==var) {print $9"\t"$12}}'
+	done | uniq > chr_breakpoint
+	call_feature
+	single_border_call
+	rm -f .pos_junctions2.$$.tmp
+fi
+
+if [[ -s .neg_junctions.$$.tmp ]] && [[ ! -s .pos_junctions.$$.tmp ]]
+then
+	awk '{print $2}' .neg_junctions.$$.tmp > .neg_junctions2.$$.tmp
+	for x in `cat .neg_junctions2.$$.tmp`
+	do
+		cat .sorter.$$.tmp |
+		awk -v var="$x" '{if($13==var) {print $9"\t"$13}}'
+	done | uniq > chr_breakpoint
+	call_feature
+	single_border_call
+	rm -f .neg_junctions2.$$.tmp
+fi
+#for x in `cat .neg_junctions2.36912.tmp` ; do head .sorter.36912.tmp | awk -v var="$x" '{if($13==var) {print $9"\t"$13}}'; done | uniq
+
+rm -f .sorter.$$.tmp
+rm -f .sorter2.$$.tmp
+rm -f .neg_junctions.$$.tmp
+rm -f .pos_junctions.$$.tmp
+
+# Cat output
+printf "\n"
+if [[ -e Intergenic_insertions ]]
+then
+	cat Intergenic_insertions 
+fi
+if [[ -e Intragenic_insertions ]]
+	then
+	cat Intragenic_insertions
+fi
+	
+fi # End of "if [[ -e $GFF ]] block
+
+######################################################################################################
+###############################     DETERMINE T-DNA INSERT LOCI    ###################################
+######################################################################################################
+
+# This final phase of the program will identify T-DNA insert loci which can be compared to their border junctions.  Based off a method proposed by (,2012), paired end reads are identified flanking the insert junctions of the T-DNA.  Start by finding reads with a complete alignment to the T-DNA insert sequence.  Then pull out there read pair and BLAST it to the genome.  Reads that contain a full match to the genome with there read pair containing a full match to the T-DNA insert indicated insertion position. Good for low coverage samples with large distances between read pairs.  
+
+if [[ -e .lflag ]] && [[ -e $read2 ]] && [[ ! -z $rds2insert ]] # If -l switch and provided along with paired reads and if reads aligning to the insert are found.
+	then
+	rds2insert_fullmatch=$(echo "${rds2insert}" | awk -F '[:\t]' '{if (($7/$4) > .95) {print}}')
+	rds2insert_R1IDout=$(echo "${rds2insert_fullmatch}" | awk -F '[:_\t]' '{if ($4 == "R1") {print $1":"$2":"$3"_"$4}}')
+	rds2insert_R2IDout=$(echo "${rds2insert_fullmatch}" | awk -F '[:_\t]' '{if ($4 == "R2") {print $1":"$2":"$3"_"$4}}') 
+	
+	if [[ ! -z $rds2insert_R1IDout ]]
+		then
+		echo "${rds2insert_R1IDout}" | sed 's/R1/R2/' > .rds2insert_R1pairID.$$.out
+	fi
+		
+	if [[ ! -z $rds2insert_R2IDout ]]
+		then
+		echo "${rds2insert_R2IDout}" | sed 's/R2/R1/' > .rds2insert_R2pairID.$$.out
+	fi		
+	
+	if [[ -e .rds2insert_R1pairIDout ]]
+		then
+		grep -A1 -f .rds2insert_R1pairID.$$.out processedrds.fasta > .rds_R2_match.fasta
+	fi
+	
+	if [[ -e .rds2insert_R2pairIDout ]]
+		then
+		grep -A1 -f .rds2insert_R2pairID.$$.out processedrds.fasta > .rds_R1_match.fasta	
+	fi
+
+	# BLAST read pair matches to genome, look for full genome match.
+	if [[ -e .rds_R2_match.fasta ]]
+		then
+		$BLAST -p blastn -d $genome -i .rds_R2_match.fasta -e 1e-10 -m 8 -o .genome_R2_match.$$.out
+		awk -F '[:\t]' '{if (($7/$4) > .95) {print}}' .genome_R2_match.$$.out > .genome_R2_fullmatch.$$.out
+	fi
+	
+	if [[ -e .rds_R1_match.fasta ]]
+		then
+		$BLAST -p blastn -d $genome -i .rds_R1_match.fasta -e 1e-10 -m 8 -o .genome_R1_match.$$.out
+		awk -F '[:\t]' '{if (($7/$4) > .95) {print}}' .genome_R1_match.$$.out > .genome_R1_fullmatch.$$.out
+	fi
+	
+	if [[ -e .genome_R1_fullmatch.$$.out ]] && [[ -e .genome_R2_fullmatch.$$.out ]]
+		then
+			echo "check both"
+			cat .genome_R1_fullmatch.$$.out .genome_R2_fullmatch.$$.out > Insert_Loci.txt
+	else
+		if [[ -e .genome_R1_fullmatch.$$.out ]]
+			then
+			echo "check R1"
+			cat .genome_R1_fullmatch.$$.out > Insert_Loci.txt
+		else
+			if [[ -e .genome_R2_fullmatch.$$.out ]]
+				then
+					echo "check R2"			
+					cat .genome_R2_fullmatch.$$.out > Insert.Loci.txt
+			else 	
+					echo "No insert loci detected"
+			fi
+		fi
+	fi
+	
+	rm -f .genome_R1_match.$$.out
+	rm -f .genome_R2_match.$$.out
+	rm -f .genome_R1_fullmatch.$$.out
+	rm -f .genome_R2_fullmatch.$$.out
+	rm -f .rds_R1_match.fasta
+	rm -f .rds_R2_match.fasta
+	rm -f .rds2insert_R1pairID.$$.out
+	rm -f .rds2insert_R2pairID.$$.out
+
+# If the -l switch is given but paired-end reads not provided
+elif [[ -e .lflag ]] && [[ ! -e $read2 ]]
+	then
+		echo "Error: insert loci mapping requires paired-end reads"
+fi
+
+
+############################################################################################################
+####################################   Convert reads to .bed files   #######################################
+############################################################################################################
+if [[ -e .dflag ]] && [[ -e Insert_Sites.txt ]]
+	then
+	tail -n +2 Insert_Sites.txt > read2bed.$$.tmp # removes heading line
+	awk '{if($12 > $13) {print $9"\t"$13"\t"$12"\t""-""\t"$1} else {print $9"\t"$12"\t"$13"\t""+""\t"$1}}' read2bed.$$.tmp > border_rds.$$.bed
+	rm -f read2bed.$$.tmp
+else
+	if [[ -e .dflag ]] && [[ ! -e Insert_Sites.txt ]]
+		then 
+		echo "Can not convert genome spanning reads into .BED files: No insertion sites found"
+	fi
+fi
+
+############################################################################################################
+############################### Cleanup ################################################################### 
+############################################################################################################
+# Remove processed reads file unless -p flag is provided.
+if [[ ! -e .pflag ]] 
+then
+	rm -f processedrds.fasta
+fi
+if [[ ! -e .rflag ]]
+then
+  rm -f rds2insert.fasta
+fi
+rm -f .lflag .pflag .dflag .rflag 
+rm -f formatdb.log
+# rm -rf .stats .distributeBLAST 
+#rm -f ${genome}.n*
+#rm -f .basefile.$$.txt
+exit 0
