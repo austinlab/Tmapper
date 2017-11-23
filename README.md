@@ -2,7 +2,9 @@
 Mapping T-DNA insertions in Arabidopsis with NGS sequence data 
 
 
-Agrobacterium mediated transformation of Arabidopsis is commonly used in the creation of transgenic Arabidopsis plants. Using whole-genome NGS sequencing data for your transgenic line, Tmapper takes FASTQ sequencing data, your insert sequence in FASTA format along with the TAIR genome and GFF3 reference files, to map the position of your T-DNA insertion within the Arabidopsis genome.
+Agrobacterium mediated transformation of Arabidopsis is commonly used in the creation of transgenic Arabidopsis plants. Using NGS sequencing data from your transgenic line, Tmapper takes FASTQ format sequencing data, your insert sequence in FASTA format along with the TAIR genome and GFF3 reference files, to map the position of your T-DNA insertion within the Arabidopsis genome.
+
+dependencies:  blastall, formatdb, bash environment
 
 usage: TMapper -a <read1.fastq> -b <read2.fastq> -i <insert.fasta> -f <genome.fasta> -g <genome.gff3> -lprdh
 
