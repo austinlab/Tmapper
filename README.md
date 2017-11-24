@@ -21,9 +21,9 @@ Arguments:
 
 Flags:
 
--l 		Turn on insert loci mapping (requires pair-end reads)
--p		Provide file of processed reads in fasta format
--r		Provide files of reads mapping to T-DNA insert and mapping positions
--d		Convert border spanning reads to .bed files
--h		Extended usage message
+-l 		Turn on insert loci mapping (requires pair-end reads)<br>
+-p		Provide file of processed reads in fasta format<br>
+-r		Provide files of reads mapping to T-DNA insert and mapping positions<br>
+-d		Convert border spanning reads to .bed files<br>
+-h		Extended usage message<br>
 
