@@ -10,11 +10,11 @@ usage: TMapper -a <read1.fastq> -b <read2.fastq> -i <insert.fasta> -f <genome.fa
 
 Arguments:
 
--a	<read1.fastq> 		sequencing reads (read 1 if paired-end):	Fastq format
--b	<read2.fastq> 		read 2 of paired-end(optional):			Fastq format
--i	<insert.fasta> 		T-DNA insert sequence:				Fasta format
--f	<genome.fasta>  	Organism genome sequence:			Fasta format(clean)
--g	<genome.gff3> 		General Feature Format(.GFF3)(optional):	GFF3 format
+-a	<read1.fastq> 		sequencing reads (read 1 if paired-end):	Fastq format <br>
+-b	<read2.fastq> 		read 2 of paired-end(optional):			Fastq format <br>
+-i	<insert.fasta> 		T-DNA insert sequence:				Fasta format <br>
+-f	<genome.fasta>  	Organism genome sequence:			Fasta format(clean) <br>
+-g	<genome.gff3> 		General Feature Format(.GFF3)(optional):	GFF3 format <br>
 
 
 
